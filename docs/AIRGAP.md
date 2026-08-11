@@ -1,7 +1,7 @@
 # Wdrożenie w środowisku bez dostępu do internetu
 
-Ten dokument jest samowystarczalny — nie wymaga niczego poza zawartością tego
-repo i jednego pliku z obrazem.
+Ten dokument jest samowystarczalny — wszystko, czego potrzeba, łącznie
+z gotowym obrazem, jest w tym repo.
 
 ## Gotowy obraz jest w repo
 
@@ -63,6 +63,23 @@ SUDO=sudo ./build.sh package
 git add image && git commit -m "Rebuild image" && git push
 ```
 
+### Aktualizacja repo już przeniesionego do strefy offline
+
+`.bundle` to migawka, nie połączenie — poprawki wypchnięte na GitHuba nie
+pojawią się po stronie offline same z siebie. Zrób nowy bundle i dociągnij go
+do istniejącego klona:
+
+```bash
+# strona z internetem
+git bundle create ../stress-test-performance.bundle --all
+
+# strona offline, w istniejącym katalogu repo
+git pull ../stress-test-performance.bundle main
+```
+
+Jeśli zmiana dotyczy tylko skryptów lub manifestów (a nie obrazu), szybciej jest
+przenieść sam plik — `build.sh` i `deploy/*.yaml` są samodzielne.
+
 ---
 
 ## Faza 3 — wepchnięcie obrazu do rejestru klastra
@@ -106,6 +123,34 @@ gdy route istnieje:
 ```bash
 SUDO=sudo NAMESPACE=perf-test ./build.sh push-local
 ```
+
+#### To samo ręcznie, bez skryptu
+
+Przydatne, gdy po stronie offline masz starszy `.bundle` (sprzed dodania tunelu)
+i nie chcesz przenosić repo jeszcze raz. Te pięć komend robi dokładnie to,
+co `push-local`:
+
+```bash
+oc port-forward -n openshift-image-registry svc/image-registry 5000:5000 &
+sleep 3
+sudo docker login -u $(oc whoami) -p $(oc whoami -t) 127.0.0.1:5000
+sudo docker tag sysbench-perf:latest 127.0.0.1:5000/perf-test/sysbench-perf:latest
+sudo docker push 127.0.0.1:5000/perf-test/sysbench-perf:latest
+kill %1
+```
+
+Obraz trafia do tego samego rejestru, więc wdrożenie jest bez zmian — klaster
+ciągnie go po wewnętrznym DNS (`image-registry.openshift-image-registry.svc:5000`),
+a nie przez tunel. Tunel jest potrzebny wyłącznie na czas pushu.
+
+Sprawdzenie, czy obraz dojechał:
+
+```bash
+oc get istag -n perf-test
+```
+
+Dla podmana zamiast dockera dołóż `--tls-verify=false` do `login` i `push`
+(podman, w odróżnieniu od dockera, weryfikuje TLS także na `127.0.0.1`).
 
 ### Jeśli route jednak istnieje
 
