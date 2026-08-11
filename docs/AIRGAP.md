@@ -29,7 +29,7 @@ cd stress-test-performance
 git bundle create ../stress-test-performance.bundle --all
 ```
 
-Przenosisz jeden plik `.bundle` (ok. 200 MB) — nośnikiem zgodnym z Waszą
+Przenosisz jeden plik `.bundle` (ok. 55 MB) — nośnikiem zgodnym z Waszą
 procedurą przenoszenia danych do strefy offline.
 
 ---
