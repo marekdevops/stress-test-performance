@@ -1,0 +1,5 @@
+dist/
+__pycache__/
+
+# Kontekst lokalny — opisuje wewnętrzne środowisko, nie jest potrzebny do wdrożenia
+CLAUDE.md

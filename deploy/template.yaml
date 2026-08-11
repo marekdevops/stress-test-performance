@@ -1,0 +1,206 @@
+apiVersion: template.openshift.io/v1
+kind: Template
+metadata:
+  name: sysbench-perf
+  annotations:
+    openshift.io/display-name: sysbench CPU/RAM performance test
+    description: >-
+      Runs sysbench cpu and sysbench memory inside a pod and serves the results
+      over an HTTP route. The benchmark runs once at startup and can be
+      re-triggered any number of times without restarting the pod.
+    iconClass: icon-shadowman
+    tags: performance,benchmark,sysbench
+message: |-
+  Deployed. Results will be at: https://${APP_NAME}-<namespace>.<apps-domain>/
+
+  oc get route ${APP_NAME} -o jsonpath='{.spec.host}'
+
+  Re-run on demand:
+    curl -kX POST https://$(oc get route ${APP_NAME} -o jsonpath='{.spec.host}')/run/all
+labels:
+  app.kubernetes.io/name: ${APP_NAME}
+  app.kubernetes.io/part-of: cpu-perf-diagnostics
+
+parameters:
+  - name: APP_NAME
+    displayName: Application name
+    value: sysbench-perf
+    required: true
+  - name: IMAGE
+    displayName: Container image
+    description: Fully qualified image reference (built locally, pushed to the cluster registry).
+    value: image-registry.openshift-image-registry.svc:5000/openshift/sysbench-perf:latest
+    required: true
+  - name: CPU_MAX_PRIME
+    displayName: sysbench cpu --cpu-max-prime
+    value: "20000"
+    required: true
+  - name: CPU_THREADS
+    displayName: sysbench cpu --threads
+    value: "1"
+    required: true
+  - name: CPU_TIME
+    displayName: sysbench cpu --time (empty = sysbench default, 10s)
+    value: ""
+  - name: MEMORY_BLOCK_SIZE
+    displayName: sysbench memory --memory-block-size
+    value: 1M
+    required: true
+  - name: MEMORY_TOTAL_SIZE
+    displayName: sysbench memory --memory-total-size
+    value: 100G
+    required: true
+  - name: MEMORY_THREADS
+    displayName: sysbench memory --threads
+    value: "1"
+    required: true
+  - name: MEMORY_TIME
+    displayName: sysbench memory --time (0 = no limit, so the full total-size is transferred)
+    value: "0"
+    required: true
+  - name: AUTORUN
+    displayName: Run both tests automatically on pod start
+    value: "true"
+    required: true
+  - name: CPU_QUOTA
+    displayName: CPU request and limit (equal -> Guaranteed QoS, no CFS throttling)
+    value: "2"
+    required: true
+  - name: MEMORY_QUOTA
+    displayName: Memory request and limit
+    value: 1Gi
+    required: true
+
+objects:
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: ${APP_NAME}
+      labels:
+        app: ${APP_NAME}
+        app.kubernetes.io/name: ${APP_NAME}
+        app.kubernetes.io/component: benchmark
+    spec:
+      # Exactly one. With more replicas the route would load-balance across
+      # pods and each refresh would show a different machine's numbers.
+      replicas: 1
+      strategy:
+        type: Recreate
+      selector:
+        matchLabels:
+          app: ${APP_NAME}
+      template:
+        metadata:
+          labels:
+            app: ${APP_NAME}
+            app.kubernetes.io/name: ${APP_NAME}
+        spec:
+          terminationGracePeriodSeconds: 30
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: sysbench
+              image: ${IMAGE}
+              imagePullPolicy: IfNotPresent
+              ports:
+                - name: http
+                  containerPort: 8080
+                  protocol: TCP
+              env:
+                - name: CPU_MAX_PRIME
+                  value: ${CPU_MAX_PRIME}
+                - name: CPU_THREADS
+                  value: ${CPU_THREADS}
+                - name: CPU_TIME
+                  value: ${CPU_TIME}
+                - name: MEMORY_BLOCK_SIZE
+                  value: ${MEMORY_BLOCK_SIZE}
+                - name: MEMORY_TOTAL_SIZE
+                  value: ${MEMORY_TOTAL_SIZE}
+                - name: MEMORY_THREADS
+                  value: ${MEMORY_THREADS}
+                - name: MEMORY_TIME
+                  value: ${MEMORY_TIME}
+                - name: AUTORUN
+                  value: ${AUTORUN}
+                - name: NODE_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: spec.nodeName
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+              resources:
+                # requests == limits on purpose: Guaranteed QoS. With a lower
+                # request the CFS quota throttles the benchmark and the result
+                # measures the cgroup, not the CPU.
+                requests:
+                  cpu: ${CPU_QUOTA}
+                  memory: ${MEMORY_QUOTA}
+                limits:
+                  cpu: ${CPU_QUOTA}
+                  memory: ${MEMORY_QUOTA}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: results
+                  mountPath: /var/results
+                - name: tmp
+                  mountPath: /tmp
+              # The benchmark runs in a worker thread, so the HTTP server keeps
+              # answering probes while a test is in flight.
+              startupProbe:
+                httpGet: { path: /healthz, port: http }
+                failureThreshold: 20
+                periodSeconds: 3
+              readinessProbe:
+                httpGet: { path: /readyz, port: http }
+                periodSeconds: 10
+              livenessProbe:
+                httpGet: { path: /healthz, port: http }
+                periodSeconds: 20
+                failureThreshold: 5
+          volumes:
+            - name: results
+              emptyDir: {}
+            - name: tmp
+              emptyDir: {}
+
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: ${APP_NAME}
+      labels:
+        app: ${APP_NAME}
+        app.kubernetes.io/name: ${APP_NAME}
+    spec:
+      selector:
+        app: ${APP_NAME}
+      ports:
+        - name: http
+          port: 8080
+          targetPort: http
+          protocol: TCP
+
+  - apiVersion: route.openshift.io/v1
+    kind: Route
+    metadata:
+      name: ${APP_NAME}
+      labels:
+        app: ${APP_NAME}
+        app.kubernetes.io/name: ${APP_NAME}
+    spec:
+      to:
+        kind: Service
+        name: ${APP_NAME}
+      port:
+        targetPort: http
+      tls:
+        termination: edge
+        insecureEdgeTerminationPolicy: Redirect

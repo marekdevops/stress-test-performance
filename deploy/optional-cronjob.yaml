@@ -1,0 +1,57 @@
+# Optional: periodic re-run, to catch drift over time.
+# Not part of the template - apply only if you want a scheduled series.
+#
+#   oc apply -f deploy/optional-cronjob.yaml
+#   oc delete -f deploy/optional-cronjob.yaml
+#
+# It only POSTs to the existing Service; it does not start a second benchmark
+# pod. If a run is already in flight the server answers 409 and the job exits
+# without disturbing it.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sysbench-perf-schedule
+  labels:
+    app: sysbench-perf
+    app.kubernetes.io/name: sysbench-perf
+spec:
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: trigger
+              # Deliberately the sysbench-perf image itself, not ubi-minimal:
+              # it is already in the cluster registry, so this works air-gapped.
+              # Adjust the namespace if you deployed somewhere other than perf-test.
+              image: image-registry.openshift-image-registry.svc:5000/perf-test/sysbench-perf:latest
+              command:
+                - python3
+                - -c
+                - |
+                  import urllib.request
+                  req = urllib.request.Request(
+                      "http://sysbench-perf:8080/run/all", method="POST")
+                  try:
+                      print("HTTP", urllib.request.urlopen(req, timeout=30).status)
+                  except urllib.error.HTTPError as e:
+                      # 409 = a run is already in flight; leave it alone.
+                      print("HTTP", e.code, e.reason)
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits: { cpu: 100m, memory: 64Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault

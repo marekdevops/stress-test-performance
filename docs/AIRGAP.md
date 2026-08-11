@@ -1,0 +1,222 @@
+# Wdrożenie w środowisku bez dostępu do internetu
+
+Ten dokument jest samowystarczalny — nie wymaga niczego poza zawartością tego
+repo i jednego pliku z obrazem.
+
+## Co trzeba przenieść przez granicę sieci
+
+| Artefakt | Skąd | Rozmiar |
+|---|---|---|
+| to repo (kod + manifesty) | `git clone` / `git bundle` | < 1 MB |
+| `sysbench-perf-latest.tar.gz` | zbudowany na maszynie **z** internetem | ~150–250 MB |
+
+**Obrazu nie da się zbudować po stronie offline.** `Containerfile` ciąga
+`sysbench` z EPEL9, a `python3` z repozytoriów UBI — jedno i drugie wymaga
+egressu. Dlatego obraz budujemy po stronie z internetem i przenosimy jako plik.
+Repo celowo **nie zawiera** tarballa: to artefakt binarny, nie kod źródłowy.
+
+---
+
+## Faza 1 — maszyna Z dostępem do internetu
+
+```bash
+git clone https://github.com/marekdevops/stress-test-performance.git
+cd stress-test-performance
+
+./build.sh build        # dodaj SUDO=sudo, jeśli docker wymaga roota
+./build.sh save         # -> dist/sysbench-perf-latest.tar.gz + .sha256
+```
+
+Jeśli maszyna offline nie ma dostępu do GitHuba (a zwykle nie ma), spakuj też
+samo repo:
+
+```bash
+git bundle create dist/repo.bundle --all
+```
+
+Do przeniesienia: `dist/sysbench-perf-latest.tar.gz`, jego `.sha256`
+oraz `dist/repo.bundle`.
+
+---
+
+## Faza 2 — maszyna offline, przygotowanie
+
+```bash
+sha256sum -c sysbench-perf-latest.tar.gz.sha256     # musi dać OK
+
+git clone repo.bundle stress-test-performance       # jeśli przenosiłeś bundle
+cd stress-test-performance
+
+./build.sh load ../sysbench-perf-latest.tar.gz      # SUDO=sudo jeśli trzeba
+```
+
+Sprawdź, że obraz jest na miejscu:
+
+```bash
+docker images | grep sysbench-perf
+```
+
+---
+
+## Faza 3 — wepchnięcie obrazu do rejestru klastra
+
+Potrzebny jest zewnętrzny route do wewnętrznego rejestru OpenShifta.
+
+```bash
+oc get route default-route -n openshift-image-registry
+```
+
+### Jeśli route istnieje
+
+Certyfikat jest zwykle self-signed, więc najpierw zaufaj jego CA (jednorazowo,
+na maszynie z której pushujesz):
+
+```bash
+REG=$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}')
+
+# CA wymaga uprawnień cluster-admin do odczytu:
+oc get secret router-ca -n openshift-ingress-operator \
+  -o jsonpath='{.data.tls\.crt}' | base64 -d > ca.crt
+
+sudo mkdir -p /etc/docker/certs.d/$REG
+sudo cp ca.crt /etc/docker/certs.d/$REG/ca.crt
+```
+
+Docker czyta `certs.d` przy każdym pushu — restart demona nie jest potrzebny.
+
+```bash
+oc new-project perf-test
+SUDO=sudo NAMESPACE=perf-test ./build.sh push
+```
+
+### Jeśli route NIE istnieje
+
+Wystawienie go to realna zmiana w klastrze (cluster-admin, do uzgodnienia
+z change managementem):
+
+```bash
+oc patch configs.imageregistry.operator.openshift.io/cluster --type=merge \
+  -p '{"spec":{"defaultRoute":true}}'
+```
+
+Alternatywy, jeśli nie wolno tego ruszać:
+
+* **skopeo, prosto z tarballa do dowolnego rejestru** (np. firmowego Quay/Harbor,
+  bez pośrednictwa lokalnego demona):
+
+  ```bash
+  skopeo copy --dest-tls-verify=false \
+    docker-archive:sysbench-perf-latest.tar.gz \
+    docker://rejestr.firma.local/perf/sysbench-perf:latest
+  ```
+
+  Wtedy w kroku wdrożenia podaj `-p IMAGE=rejestr.firma.local/perf/sysbench-perf:latest`.
+
+* **`oc image mirror`** — jeśli macie już ustawiony proces mirrorowania
+  dla instalacji disconnected, użyjcie tej samej ścieżki.
+
+---
+
+## Faza 4 — wdrożenie
+
+```bash
+oc new-app -f deploy/template.yaml \
+  -p IMAGE=image-registry.openshift-image-registry.svc:5000/perf-test/sysbench-perf:latest \
+  -p CPU_QUOTA=2
+```
+
+Template tworzy wyłącznie `Deployment` + `Service` + `Route` we własnym
+projekcie. Nie dotyka niczego na poziomie node'a, kubeleta ani klastra.
+
+Dobierz `CPU_QUOTA` do wolnej pojemności node'a — przy zbyt dużej wartości pod
+zostanie `Pending` z `Insufficient cpu`:
+
+```bash
+oc describe node <NODE> | grep -A6 "Allocated resources"
+```
+
+Zasada: `CPU_QUOTA` = `CPU_THREADS` + 1. Ta dodatkowa jednostka jest dla wątku
+serwera HTTP — bez niej odpytywanie UI podgryza rdzeń benchmarku i widać to jako
+niezerowy `nr_throttled`.
+
+---
+
+## Faza 5 — weryfikacja
+
+```bash
+oc rollout status deploy/sysbench-perf
+oc logs -f deploy/sysbench-perf
+
+ROUTE=$(oc get route sysbench-perf -o jsonpath='{.spec.host}')
+echo "https://$ROUTE"
+
+curl -k "https://$ROUTE/cpu"
+curl -k "https://$ROUTE/memory"
+curl -kX POST "https://$ROUTE/run/all"      # powtórka bez restartu poda
+```
+
+Route ma certyfikat self-signed — w przeglądarce trzeba raz zaakceptować wyjątek,
+w `curl` używać `-k`.
+
+Poprawny start w logach wygląda tak:
+
+```
+sysbench: sysbench 1.0.20
+node=<nazwa> pod=<nazwa> nproc=4 quota=2.0 cores
+AUTORUN enabled - queueing cpu + memory
+listening on :8080
+```
+
+---
+
+## Wybór node'a do testu
+
+Template nie ustawia `nodeSelector`. Żeby przypiąć test do konkretnej maszyny
+(porównanie bare-metal vs node wirtualny):
+
+```bash
+oc patch deployment sysbench-perf --type=merge \
+  -p '{"spec":{"template":{"spec":{"nodeSelector":{"kubernetes.io/hostname":"NAZWA-NODE"}}}}}'
+```
+
+Pod zostanie odtworzony na wskazanym node'zie (strategia `Recreate`), a nazwa
+node'a trafi do każdego wyniku przez Downward API.
+
+---
+
+## Eksport wyników z sieci offline
+
+Historia żyje w `emptyDir` i ginie razem z podem. Do archiwum:
+
+```bash
+curl -sk "https://$ROUTE/api/results" > wyniki-$(date +%Y%m%d-%H%M).json
+```
+
+JSON zawiera komplet: metryki sysbencha, deltę throttlingu CFS, limit cgroup,
+`physical_package_id` per vCPU, MHz przed/po oraz `started_at`/`finished_at`
+w UTC — czyli okno czasowe do skorelowania z próbkowaniem `psr` i MHz
+na fizycznym hoście.
+
+---
+
+## Odinstalowanie
+
+```bash
+oc delete all -l app.kubernetes.io/name=sysbench-perf
+# lub w całości:
+oc delete project perf-test
+```
+
+---
+
+## Rozwiązywanie problemów
+
+| Objaw | Przyczyna | Rozwiązanie |
+|---|---|---|
+| pod `Pending`, `Insufficient cpu` | `CPU_QUOTA` > wolna pojemność node'a | zmniejsz `CPU_QUOTA` |
+| `ImagePullBackOff` | obraz nie trafił do rejestru albo zła ścieżka w `IMAGE` | `oc get istag -n <ns>`, sprawdź `IMAGE` |
+| `x509: certificate signed by unknown authority` przy pushu | brak CA rejestru | patrz Faza 3 |
+| `exit 127`, `No such file or directory: 'sysbench'` w wyniku | obraz zbudowany bez EPEL (brak egressu w czasie builda) | zbuduj ponownie na maszynie z internetem |
+| `409` przy `POST /run/*` | benchmark już trwa | poczekaj; `GET /api/status` pokazuje stan |
+| pod `OOMKilled` | `block_size` większy niż `MEMORY_QUOTA` | podnieś `MEMORY_QUOTA` albo zmniejsz blok |
+| niezerowy `nr_throttled` | CFS dławi benchmark | podnieś `CPU_QUOTA` do `CPU_THREADS + 1`; wynik z throttlingiem nie jest miarą sprzętu |

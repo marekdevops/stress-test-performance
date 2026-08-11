@@ -1,0 +1,6 @@
+.git
+.gitignore
+dist
+deploy
+*.md
+build.sh
