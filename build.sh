@@ -3,6 +3,8 @@
 #
 #   ./build.sh build            build the image locally
 #   ./build.sh save             export it to dist/sysbench-perf.tar.gz
+#   ./build.sh package          export + split into image/ chunks, committable to git
+#   ./build.sh unpack           reassemble image/ chunks and import the image
 #   ./build.sh push             push into the internal registry of the logged-in cluster
 #   ./build.sh load <tar.gz>    import an exported image on another machine
 #
@@ -14,7 +16,12 @@ IMAGE_NAME="${IMAGE_NAME:-sysbench-perf}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 LOCAL_IMAGE="${IMAGE_NAME}:${IMAGE_TAG}"
 NAMESPACE="${NAMESPACE:-openshift}"
-DIST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dist"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIST_DIR="${REPO_DIR}/dist"
+# Chunks live in the repo so `git clone` alone delivers a runnable image.
+IMAGE_DIR="${REPO_DIR}/image"
+# GitHub hard-rejects any single file over 100MB; stay well under it.
+CHUNK_SIZE="${CHUNK_SIZE:-90M}"
 
 # podman if present, docker otherwise
 ENGINE="${ENGINE:-$(command -v podman >/dev/null 2>&1 && echo podman || echo docker)}"
@@ -50,6 +57,41 @@ cmd_load() {
   gunzip -c "${archive}" | engine load
 }
 
+cmd_package() {
+  cmd_save
+  local src="${DIST_DIR}/${IMAGE_NAME}-${IMAGE_TAG}.tar.gz"
+  rm -rf "${IMAGE_DIR}"
+  mkdir -p "${IMAGE_DIR}"
+  info "splitting into ${CHUNK_SIZE} chunks -> image/"
+  split -b "${CHUNK_SIZE}" -d -a 2 "${src}" "${IMAGE_DIR}/${IMAGE_NAME}.tar.gz.part"
+  ( cd "${IMAGE_DIR}" && sha256sum ./*.part?? > SHA256SUMS )
+  cp "${src}.sha256" "${IMAGE_DIR}/image.tar.gz.sha256"
+  info "$(ls -1 "${IMAGE_DIR}"/*.part?? | wc -l) chunk(s):"
+  ls -lh "${IMAGE_DIR}" | tail -n +2 | awk '{print "    " $9 "  " $5}'
+  info "commit the image/ directory; offline side runs: ./build.sh unpack"
+}
+
+cmd_unpack() {
+  [[ -d "${IMAGE_DIR}" ]] || die "no image/ directory - was the repo packaged with './build.sh package'?"
+  local parts=( "${IMAGE_DIR}"/*.part?? )
+  [[ -e "${parts[0]}" ]] || die "no chunks found in ${IMAGE_DIR}"
+
+  info "verifying ${#parts[@]} chunk(s)"
+  ( cd "${IMAGE_DIR}" && sha256sum -c SHA256SUMS ) || die "chunk checksum mismatch - transfer was incomplete"
+
+  mkdir -p "${DIST_DIR}"
+  local out="${DIST_DIR}/${IMAGE_NAME}-${IMAGE_TAG}.tar.gz"
+  info "reassembling -> ${out}"
+  cat "${parts[@]}" > "${out}"
+  # The offline side never ran `save`, so take the archive checksum from the repo.
+  cp "${IMAGE_DIR}/image.tar.gz.sha256" "${out}.sha256"
+  ( cd "${DIST_DIR}" && sha256sum -c "$(basename "${out}").sha256" ) \
+    || die "reassembled archive does not match its checksum"
+
+  cmd_load "${out}"
+  info "image imported - continue with: ./build.sh push"
+}
+
 cmd_push() {
   command -v oc >/dev/null || die "oc not found"
   oc whoami >/dev/null 2>&1 || die "not logged in - run 'oc login' first"
@@ -79,8 +121,10 @@ Alternatively transfer with skopeo:
 case "${1:-}" in
   build) cmd_build ;;
   save)  cmd_save ;;
+  package) cmd_package ;;
+  unpack)  cmd_unpack ;;
   load)  shift; cmd_load "$@" ;;
   push)  cmd_push ;;
-  all)   cmd_build; cmd_save ;;
-  *)     sed -n '2,10p' "$0"; exit 1 ;;
+  all)   cmd_build; cmd_package ;;
+  *)     sed -n '2,12p' "$0"; exit 1 ;;
 esac

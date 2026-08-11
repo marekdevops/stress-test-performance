@@ -22,20 +22,26 @@ dwa równoległe sysbenche mierzyłyby własną kontencję, nie sprzęt.
 
 ## Wdrożenie
 
-> **Środowisko bez dostępu do internetu:** pełna procedura krok po kroku jest
-> w [`docs/AIRGAP.md`](docs/AIRGAP.md). Obrazu nie da się zbudować po stronie
-> offline (sysbench pochodzi z EPEL) — buduje się go po stronie z internetem
-> i przenosi jako plik.
+> **Środowisko bez dostępu do internetu:** gotowy obraz leży w repo (`image/`),
+> więc wystarczy `git clone` + `./build.sh unpack`. Pełna procedura krok po kroku
+> w [`docs/AIRGAP.md`](docs/AIRGAP.md).
 
 Obraz budujemy lokalnie i przenosimy — build nie odbywa się w klastrze.
 
 ```bash
-./build.sh build                 # zbuduj lokalnie (docker lub podman)
-./build.sh save                  # -> dist/sysbench-perf-latest.tar.gz
-# przenieś plik do środowiska docelowego, tam:
-./build.sh load dist/sysbench-perf-latest.tar.gz
+./build.sh unpack                # odtwórz obraz z image/ (nie wymaga internetu)
 ./build.sh push                  # wepchnij do rejestru zalogowanego klastra
 ```
+
+Przebudowa obrazu (wymaga internetu — sysbench pochodzi z EPEL9):
+
+```bash
+./build.sh build                 # zbuduj lokalnie (docker lub podman)
+./build.sh package               # -> image/ w kawałkach po 90 MB, do commitu
+```
+
+Gdy docker wymaga roota, dodaj `SUDO=sudo` — elewuje wyłącznie silnik
+kontenerowy, `oc` dalej działa z Twoim loginem do klastra.
 
 Wdrożenie — jedna komenda:
 

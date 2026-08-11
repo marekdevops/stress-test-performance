@@ -3,57 +3,64 @@
 Ten dokument jest samowystarczalny — nie wymaga niczego poza zawartością tego
 repo i jednego pliku z obrazem.
 
-## Co trzeba przenieść przez granicę sieci
+## Gotowy obraz jest w repo
 
-| Artefakt | Skąd | Rozmiar |
-|---|---|---|
-| to repo (kod + manifesty) | `git clone` / `git bundle` | < 1 MB |
-| `sysbench-perf-latest.tar.gz` | zbudowany na maszynie **z** internetem | ~150–250 MB |
+**Obrazu nie da się zbudować po stronie offline** — `Containerfile` ciąga
+`sysbench` z EPEL9, a `python3` z repozytoriów UBI, jedno i drugie wymaga
+egressu. Dlatego zbudowany obraz leży w katalogu `image/`, w kawałkach po 90 MB
+(GitHub twardo odrzuca pojedyncze pliki powyżej 100 MB). Sklejasz je jedną
+komendą, bez internetu i bez dodatkowych narzędzi — wystarczy `cat` i `sha256sum`.
 
-**Obrazu nie da się zbudować po stronie offline.** `Containerfile` ciąga
-`sysbench` z EPEL9, a `python3` z repozytoriów UBI — jedno i drugie wymaga
-egressu. Dlatego obraz budujemy po stronie z internetem i przenosimy jako plik.
-Repo celowo **nie zawiera** tarballa: to artefakt binarny, nie kod źródłowy.
+Do przeniesienia przez granicę sieci jest więc **tylko repo**.
 
 ---
 
-## Faza 1 — maszyna Z dostępem do internetu
+## Faza 1 — pobranie repo (maszyna Z dostępem do internetu)
 
 ```bash
 git clone https://github.com/marekdevops/stress-test-performance.git
-cd stress-test-performance
-
-./build.sh build        # dodaj SUDO=sudo, jeśli docker wymaga roota
-./build.sh save         # -> dist/sysbench-perf-latest.tar.gz + .sha256
 ```
 
-Jeśli maszyna offline nie ma dostępu do GitHuba (a zwykle nie ma), spakuj też
-samo repo:
+Jeśli maszyna offline nie ma dostępu do GitHuba (a zwykle nie ma), spakuj repo
+do jednego pliku razem z całą zawartością `image/`:
 
 ```bash
-git bundle create dist/repo.bundle --all
+cd stress-test-performance
+git bundle create ../stress-test-performance.bundle --all
 ```
 
-Do przeniesienia: `dist/sysbench-perf-latest.tar.gz`, jego `.sha256`
-oraz `dist/repo.bundle`.
+Przenosisz jeden plik `.bundle` (ok. 200 MB) — nośnikiem zgodnym z Waszą
+procedurą przenoszenia danych do strefy offline.
 
 ---
 
-## Faza 2 — maszyna offline, przygotowanie
+## Faza 2 — maszyna offline: odtworzenie obrazu
 
 ```bash
-sha256sum -c sysbench-perf-latest.tar.gz.sha256     # musi dać OK
-
-git clone repo.bundle stress-test-performance       # jeśli przenosiłeś bundle
+git clone stress-test-performance.bundle stress-test-performance   # jeśli bundle
 cd stress-test-performance
 
-./build.sh load ../sysbench-perf-latest.tar.gz      # SUDO=sudo jeśli trzeba
+./build.sh unpack          # dodaj SUDO=sudo, jeśli docker wymaga roota
 ```
+
+`unpack` weryfikuje sumy SHA256 każdego kawałka, skleja je, sprawdza sumę
+całego archiwum i importuje obraz do lokalnego dockera/podmana. Jeśli transfer
+był niepełny, zatrzyma się z błędem zamiast zaimportować uszkodzony obraz.
 
 Sprawdź, że obraz jest na miejscu:
 
 ```bash
 docker images | grep sysbench-perf
+```
+
+### Aktualizacja obrazu (strona z internetem)
+
+Po zmianie kodu przepakuj i zacommituj `image/`:
+
+```bash
+SUDO=sudo ./build.sh build
+SUDO=sudo ./build.sh package
+git add image && git commit -m "Rebuild image" && git push
 ```
 
 ---

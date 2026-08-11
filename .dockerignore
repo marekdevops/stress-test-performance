@@ -1,6 +1,8 @@
 .git
 .gitignore
 dist
+image
 deploy
+docs
 *.md
 build.sh
