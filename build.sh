@@ -129,19 +129,35 @@ push_via_port_forward() {
   done
 
   info "no registry route - tunnelling to svc/image-registry on 127.0.0.1:${port}"
-  oc port-forward -n openshift-image-registry svc/image-registry "${port}:5000" >/dev/null 2>&1 &
+  local pf_log
+  pf_log="$(mktemp)"
+  oc port-forward -n openshift-image-registry svc/image-registry "${port}:5000" >"${pf_log}" 2>&1 &
   local pf_pid=$!
   # shellcheck disable=SC2064
-  trap "kill ${pf_pid} 2>/dev/null || true" EXIT
+  trap "kill ${pf_pid} 2>/dev/null || true; rm -f '${pf_log}'" EXIT
 
   local ready=""
-  for _ in $(seq 1 20); do
+  for _ in $(seq 1 60); do
     if (echo >"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then ready=yes; break; fi
+    # No point waiting out the timeout if oc already gave up.
+    kill -0 "${pf_pid}" 2>/dev/null || break
     sleep 0.5
   done
-  [[ -n "${ready}" ]] || die "the tunnel did not come up.
-Check that you may port-forward in openshift-image-registry:
-  oc auth can-i create pods/portforward -n openshift-image-registry"
+
+  if [[ -z "${ready}" ]]; then
+    echo "--- oc port-forward output ---" >&2
+    cat "${pf_log}" >&2
+    echo "------------------------------" >&2
+    die "the tunnel did not come up. Diagnose with:
+  oc auth can-i create pods/portforward -n openshift-image-registry
+  oc get configs.imageregistry.operator.openshift.io/cluster -o jsonpath='{.spec.managementState}'
+  oc get pods -n openshift-image-registry
+  oc get endpoints image-registry -n openshift-image-registry
+
+If the registry is Removed or you have no access to that namespace, push to
+your corporate registry instead:
+  REGISTRY=rejestr.firma.local ${SUDO:+SUDO=${SUDO} }NAMESPACE=${NAMESPACE} $0 push"
+  fi
 
   do_push "127.0.0.1:${port}" insecure
   kill "${pf_pid}" 2>/dev/null || true
