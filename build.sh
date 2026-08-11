@@ -108,8 +108,19 @@ do_push() {
   local flags
   flags="$(tls_flags "${mode}")"
 
-  info "logging in to ${registry}"
-  engine login ${flags} -u "$(oc whoami)" -p "$(oc whoami -t)" "${registry}"
+  # Running the whole script under sudo makes oc run as root, without the
+  # invoking user's kubeconfig - the credentials then arrive empty and the
+  # registry answers "invalid username/password". Fail loudly instead.
+  local user token
+  user="$(oc whoami 2>/dev/null || true)"
+  token="$(oc whoami -t 2>/dev/null || true)"
+  if [[ -z "${user}" || -z "${token}" ]]; then
+    die "oc returned no user or token$([[ ${EUID} -eq 0 ]] && echo " (running as root: use 'SUDO=sudo $0 ...' instead of 'sudo $0 ...')").
+Check with: oc whoami && oc whoami -t"
+  fi
+
+  info "logging in to ${registry} as ${user}"
+  engine login ${flags} -u "${user}" -p "${token}" "${registry}"
   info "pushing ${target}"
   engine tag "${LOCAL_IMAGE}" "${target}"
   engine push ${flags} "${target}"
