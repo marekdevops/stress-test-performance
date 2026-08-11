@@ -33,6 +33,10 @@ Obraz budujemy lokalnie i przenosimy — build nie odbywa się w klastrze.
 ./build.sh push                  # wepchnij do rejestru zalogowanego klastra
 ```
 
+`push` sam znajduje drogę do rejestru: `REGISTRY=...` (firmowy Quay/Harbor),
+route wewnętrznego rejestru, a jeśli route'a nie ma — tunel `oc port-forward`,
+który **nie wymaga żadnej zmiany w klastrze**.
+
 Przebudowa obrazu (wymaga internetu — sysbench pochodzi z EPEL9):
 
 ```bash

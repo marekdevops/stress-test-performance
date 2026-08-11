@@ -67,13 +67,47 @@ git add image && git commit -m "Rebuild image" && git push
 
 ## Faza 3 — wepchnięcie obrazu do rejestru klastra
 
-Potrzebny jest zewnętrzny route do wewnętrznego rejestru OpenShifta.
-
 ```bash
-oc get route default-route -n openshift-image-registry
+oc new-project perf-test
+SUDO=sudo NAMESPACE=perf-test ./build.sh push
 ```
 
-### Jeśli route istnieje
+`push` sam wybiera drogę, w tej kolejności:
+
+1. **`REGISTRY=...`** — jeśli podasz firmowy rejestr (Quay/Harbor/Artifactory),
+   idzie prosto tam. W środowisku disconnected to zwykle najlepsza opcja, bo taki
+   rejestr i tak już tam jest — z niego instalowano klaster:
+   ```bash
+   REGISTRY=rejestr.firma.local SUDO=sudo NAMESPACE=perf-test ./build.sh push
+   ```
+2. **route do wewnętrznego rejestru** — jeśli ktoś go wystawił (patrz niżej).
+3. **tunel `oc port-forward`** — automatyczny fallback, **nie wymaga żadnej
+   zmiany w klastrze**.
+
+### Tunel — gdy nie ma route'a (najczęstszy przypadek w strefie zamkniętej)
+
+Komunikat `the internal registry has no external route` w starszej wersji
+skryptu oznaczał ślepy zaułek. Teraz `push` sam zestawia tunel do
+`svc/image-registry`, pushuje przez `127.0.0.1` i tunel zamyka. Nie trzeba
+wystawiać route'a, ruszać konfiguracji rejestru ani zaufania do CA — docker
+traktuje `127.0.0.0/8` jako rejestr insecure, a podman dostaje
+`--tls-verify=false` automatycznie.
+
+Wymagane uprawnienie (sprawdź, jeśli push się nie uda):
+
+```bash
+oc auth can-i create pods/portforward -n openshift-image-registry
+```
+
+Port dobierany jest automatycznie od 5000 w górę, gdyby był zajęty; można go
+narzucić przez `LOCAL_PORT=5050`. Tę ścieżkę można też wymusić ręcznie, nawet
+gdy route istnieje:
+
+```bash
+SUDO=sudo NAMESPACE=perf-test ./build.sh push-local
+```
+
+### Jeśli route jednak istnieje
 
 Certyfikat jest zwykle self-signed, więc najpierw zaufaj jego CA (jednorazowo,
 na maszynie z której pushujesz):
@@ -91,25 +125,20 @@ sudo cp ca.crt /etc/docker/certs.d/$REG/ca.crt
 
 Docker czyta `certs.d` przy każdym pushu — restart demona nie jest potrzebny.
 
-```bash
-oc new-project perf-test
-SUDO=sudo NAMESPACE=perf-test ./build.sh push
-```
+### Wystawienie route'a (opcjonalne, wymaga change managementu)
 
-### Jeśli route NIE istnieje
-
-Wystawienie go to realna zmiana w klastrze (cluster-admin, do uzgodnienia
-z change managementem):
+Tunel z poprzedniej sekcji czyni to zbędnym, ale gdyby route był potrzebny
+na stałe — to realna zmiana w klastrze, cluster-admin:
 
 ```bash
 oc patch configs.imageregistry.operator.openshift.io/cluster --type=merge \
   -p '{"spec":{"defaultRoute":true}}'
 ```
 
-Alternatywy, jeśli nie wolno tego ruszać:
+### Jeszcze inne drogi
 
-* **skopeo, prosto z tarballa do dowolnego rejestru** (np. firmowego Quay/Harbor,
-  bez pośrednictwa lokalnego demona):
+* **skopeo, prosto z archiwum do dowolnego rejestru**, bez pośrednictwa
+  lokalnego demona (archiwum powstaje w `dist/` po `./build.sh unpack`):
 
   ```bash
   skopeo copy --dest-tls-verify=false \
@@ -222,7 +251,9 @@ oc delete project perf-test
 |---|---|---|
 | pod `Pending`, `Insufficient cpu` | `CPU_QUOTA` > wolna pojemność node'a | zmniejsz `CPU_QUOTA` |
 | `ImagePullBackOff` | obraz nie trafił do rejestru albo zła ścieżka w `IMAGE` | `oc get istag -n <ns>`, sprawdź `IMAGE` |
-| `x509: certificate signed by unknown authority` przy pushu | brak CA rejestru | patrz Faza 3 |
+| `x509: certificate signed by unknown authority` przy pushu | brak CA rejestru | patrz Faza 3, albo użyj `push-local` (tunel omija problem) |
+| `the internal registry has no external route` | brak route'a do rejestru | nic nie rób — `push` sam przechodzi na tunel; wymaga prawa `pods/portforward` |
+| `the tunnel did not come up` | brak prawa do port-forward | `oc auth can-i create pods/portforward -n openshift-image-registry` |
 | `exit 127`, `No such file or directory: 'sysbench'` w wyniku | obraz zbudowany bez EPEL (brak egressu w czasie builda) | zbuduj ponownie na maszynie z internetem |
 | `409` przy `POST /run/*` | benchmark już trwa | poczekaj; `GET /api/status` pokazuje stan |
 | pod `OOMKilled` | `block_size` większy niż `MEMORY_QUOTA` | podnieś `MEMORY_QUOTA` albo zmniejsz blok |

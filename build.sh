@@ -5,7 +5,8 @@
 #   ./build.sh save             export it to dist/sysbench-perf.tar.gz
 #   ./build.sh package          export + split into image/ chunks, committable to git
 #   ./build.sh unpack           reassemble image/ chunks and import the image
-#   ./build.sh push             push into the internal registry of the logged-in cluster
+#   ./build.sh push            push into the cluster registry (route, tunnel, or $REGISTRY)
+#   ./build.sh push-local       force the tunnel path even if a route exists
 #   ./build.sh load <tar.gz>    import an exported image on another machine
 #
 # Nothing here touches a cluster except `push`, which only writes an image
@@ -92,30 +93,83 @@ cmd_unpack() {
   info "image imported - continue with: ./build.sh push"
 }
 
-cmd_push() {
-  command -v oc >/dev/null || die "oc not found"
-  oc whoami >/dev/null 2>&1 || die "not logged in - run 'oc login' first"
+# podman verifies TLS on localhost; docker already treats 127.0.0.0/8 as insecure
+tls_flags() {
+  if [[ "${1:-}" == "insecure" && "${ENGINE}" == *podman* ]]; then
+    echo "--tls-verify=false"
+  fi
+  # Must succeed even when it prints nothing: the caller assigns it under set -e.
+  return 0
+}
 
-  local registry
-  registry="$(oc get route default-route -n openshift-image-registry \
-    -o jsonpath='{.spec.host}' 2>/dev/null || true)"
-  [[ -n "${registry}" ]] || die "the internal registry has no external route.
-Expose it first (cluster-admin, a real change - ask before doing this):
-  oc patch configs.imageregistry.operator.openshift.io/cluster --type=merge \\
-     -p '{\"spec\":{\"defaultRoute\":true}}'
-Alternatively transfer with skopeo:
-  skopeo copy docker-archive:dist/${IMAGE_NAME}-${IMAGE_TAG}.tar.gz docker://<registry>/<ns>/${LOCAL_IMAGE}"
-
+do_push() {
+  local registry="$1" mode="${2:-}"
   local target="${registry}/${NAMESPACE}/${LOCAL_IMAGE}"
+  local flags
+  flags="$(tls_flags "${mode}")"
+
   info "logging in to ${registry}"
-  engine login -u "$(oc whoami)" -p "$(oc whoami -t)" "${registry}"
+  engine login ${flags} -u "$(oc whoami)" -p "$(oc whoami -t)" "${registry}"
   info "pushing ${target}"
   engine tag "${LOCAL_IMAGE}" "${target}"
-  engine push "${target}"
+  engine push ${flags} "${target}"
   echo
   info "deploy with:"
   echo "  oc new-app -f deploy/template.yaml \\"
   echo "     -p IMAGE=image-registry.openshift-image-registry.svc:5000/${NAMESPACE}/${LOCAL_IMAGE}"
+}
+
+# Push through a local tunnel to the registry Service. Needs no route and no
+# cluster change at all - just port-forward rights in openshift-image-registry.
+push_via_port_forward() {
+  local port="${LOCAL_PORT:-5000}"
+  while (echo >"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; do
+    info "port ${port} is busy, trying $((port + 1))"
+    port=$((port + 1))
+  done
+
+  info "no registry route - tunnelling to svc/image-registry on 127.0.0.1:${port}"
+  oc port-forward -n openshift-image-registry svc/image-registry "${port}:5000" >/dev/null 2>&1 &
+  local pf_pid=$!
+  # shellcheck disable=SC2064
+  trap "kill ${pf_pid} 2>/dev/null || true" EXIT
+
+  local ready=""
+  for _ in $(seq 1 20); do
+    if (echo >"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then ready=yes; break; fi
+    sleep 0.5
+  done
+  [[ -n "${ready}" ]] || die "the tunnel did not come up.
+Check that you may port-forward in openshift-image-registry:
+  oc auth can-i create pods/portforward -n openshift-image-registry"
+
+  do_push "127.0.0.1:${port}" insecure
+  kill "${pf_pid}" 2>/dev/null || true
+  trap - EXIT
+}
+
+cmd_push() {
+  command -v oc >/dev/null || die "oc not found"
+  oc whoami >/dev/null 2>&1 || die "not logged in - run 'oc login' first"
+
+  # 1. an explicitly given registry (corporate Quay/Harbor mirror) wins
+  if [[ -n "${REGISTRY:-}" ]]; then
+    info "using REGISTRY=${REGISTRY}"
+    do_push "${REGISTRY}"
+    return
+  fi
+
+  # 2. the internal registry's own route, if someone exposed it
+  local registry
+  registry="$(oc get route default-route -n openshift-image-registry \
+    -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  if [[ -n "${registry}" ]]; then
+    do_push "${registry}"
+    return
+  fi
+
+  # 3. no route: tunnel to the Service instead of asking for a cluster change
+  push_via_port_forward
 }
 
 case "${1:-}" in
@@ -125,6 +179,7 @@ case "${1:-}" in
   unpack)  cmd_unpack ;;
   load)  shift; cmd_load "$@" ;;
   push)  cmd_push ;;
+  push-local) push_via_port_forward ;;
   all)   cmd_build; cmd_package ;;
   *)     sed -n '2,12p' "$0"; exit 1 ;;
 esac
