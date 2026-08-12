@@ -1,0 +1,56 @@
+# Wariant A - maksymalna wydajność CPU, BEZ restartu node'a.
+#
+# Node Tuning Operator (NTO) jest w OpenShifcie zawsze obecny i zarządza TuneD
+# na każdym node'zie. Ten CR dokłada własny profil dziedziczący po standardowym
+# `openshift-node` i zmienia wyłącznie ustawienia zarządzania energią CPU.
+#
+# Wszystko tutaj jest odwracalne bez restartu: TuneD zapisuje to przez sysfs,
+# a usunięcie CR-a przywraca poprzedni profil. ŻADNYCH kernel args, ŻADNEGO
+# MachineConfiga, ŻADNEGO reboota - patrz wariant B, jeśli chcesz iść dalej.
+#
+#   oc apply -f tuned-cpu-performance.yaml      # wdrożenie
+#   oc delete -f tuned-cpu-performance.yaml     # wycofanie
+#
+# UWAGA - kierować na node'y BARE-METAL, nie na wirtualne node'y OpenShifta.
+# Wewnątrz gościa KVM nie ma sterownika cpufreq ani dostępu do p-state hosta,
+# więc na VM ten profil nie zrobi absolutnie nic. Częstotliwością rządzi
+# fizyczny host i tylko tam ma to sens.
+apiVersion: tuned.openshift.io/v1
+kind: Tuned
+metadata:
+  name: cpu-performance-bench
+  namespace: openshift-cluster-node-tuning-operator
+spec:
+  profile:
+    - name: cpu-performance-bench
+      data: |
+        [main]
+        summary=Maximum CPU performance for benchmarking (no reboot required)
+        include=openshift-node
+
+        [cpu]
+        # Governor "performance" trzyma rdzenie na maksymalnej częstotliwości
+        # zamiast skalować ją w dół przy niskim obciążeniu.
+        governor=performance
+        # Podpowiedź dla HWP/Intel P-State: przedkładaj wydajność nad energię.
+        energy_perf_bias=performance
+        # Dolny próg P-State na 100% - CPU nie schodzi poniżej pełnej częstotliwości.
+        min_perf_pct=100
+
+        [sysfs]
+        # Upewnij się, że turbo NIE jest wyłączone. Jeśli plik nie istnieje
+        # (inny sterownik niż intel_pstate), TuneD to pominie.
+        /sys/devices/system/cpu/intel_pstate/no_turbo=0
+
+  recommend:
+    # UWAGA: podmień etykietę na tę, która faktycznie opisuje Twój mały pool
+    # testowy. Sprawdź, czym są oznaczone node'y:
+    #   oc get nodes --show-labels
+    #   oc get nodes -l node-role.kubernetes.io/worker-priority
+    - match:
+        - label: node-role.kubernetes.io/worker-priority
+      # Niższa liczba = wyższy priorytet. Domyślne wpisy NTO to zwykle 30
+      # (control-plane) i 40 (node), więc 15 wygrywa. Zweryfikuj u siebie:
+      #   oc get tuned default -n openshift-cluster-node-tuning-operator -o yaml
+      priority: 15
+      profile: cpu-performance-bench

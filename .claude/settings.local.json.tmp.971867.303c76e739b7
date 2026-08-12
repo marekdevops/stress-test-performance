@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(timeout 90 oc debug node/crc -q -- chroot /host cat)",
+      "Bash(git add *)",
+      "Bash(git commit -q -m 'Add TuneD profiles for CPU performance benchmarking *)",
+      "Bash(git push *)"
+    ]
+  }
+}

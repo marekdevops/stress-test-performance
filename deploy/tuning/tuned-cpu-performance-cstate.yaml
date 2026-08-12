@@ -1,0 +1,50 @@
+# Wariant B - jak A, plus blokada głębokich stanów C. NADAL bez restartu.
+#
+# Różnica względem wariantu A to jedna linia: `force_latency`. TuneD zgłasza
+# przez PM QoS (/dev/cpu_dma_latency) wymaganie niskiego opóźnienia wybudzania,
+# co trzyma rdzenie w płytkich stanach C. Efekt: znikają opóźnienia wybudzania
+# rdzenia z C6, co pomaga przy obciążeniach nierównomiernych.
+#
+# NIE stosuj obu wariantów naraz - to dwa warianty tego samego eksperymentu.
+#
+# ==========================================================================
+# WAŻNE, wbrew intuicji: to nie musi być szybsze od wariantu A.
+#
+# Na Xeonach maksymalny turbo single-core jest osiągalny TYLKO wtedy, gdy
+# pozostałe rdzenie są w głębokich stanach C - to zwalnia budżet mocy i
+# termiczny. Trzymając wszystkie 256 wątków w C1, możesz obniżyć osiągalny
+# turbo z 3.9 GHz do okolic all-core (~2.9 GHz) i **pogorszyć** wynik
+# single-thread, jednocześnie podnosząc pobór mocy.
+#
+# Dlatego to osobny plik: zmierz A i B niezależnie, nie zakładaj że B > A.
+# ==========================================================================
+apiVersion: tuned.openshift.io/v1
+kind: Tuned
+metadata:
+  name: cpu-performance-bench-cstate
+  namespace: openshift-cluster-node-tuning-operator
+spec:
+  profile:
+    - name: cpu-performance-bench-cstate
+      data: |
+        [main]
+        summary=Maximum CPU performance with a C-state floor (no reboot required)
+        include=openshift-node
+
+        [cpu]
+        governor=performance
+        energy_perf_bias=performance
+        min_perf_pct=100
+        # Składnia z RHEL 9 (profil latency-performance): ogranicz stany C
+        # do id 1, z progiem 3 us. Na starszym TuneD, gdyby ta składnia nie
+        # była wspierana, użyj po prostu: force_latency=1
+        force_latency=cstate.id_no_zero:1|3
+
+        [sysfs]
+        /sys/devices/system/cpu/intel_pstate/no_turbo=0
+
+  recommend:
+    - match:
+        - label: node-role.kubernetes.io/worker-priority
+      priority: 15
+      profile: cpu-performance-bench-cstate
